@@ -216,3 +216,30 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local Geospatial Data
+*.geojson
+*.tif
+*.tiff
+data/
+
+# Cache
+cache/
+
+# Environment
+.env/
+
+# Next.js & Node.js Frontend Core
+node_modules/
+.next/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.turbo/
+
+# Next.js Specific Environments
+.env.local
+.env.production
+.env.development
+.env.*.local
