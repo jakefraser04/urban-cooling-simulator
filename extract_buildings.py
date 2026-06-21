@@ -1,35 +1,52 @@
+"""
+Extract building footprints from OpenStreetMap for urban thermal analysis.
+
+This module queries OSMnx (OpenStreetMap via Overpass API) for building
+footprints within a specified radius and exports them as GeoJSON for use
+in thermal simulation and analysis workflows.
+"""
+
 import osmnx as ox
 import geopandas as gpd
 
+# Query parameters
+CENTER_POINT = (39.1031, -84.5120)  # Downtown Cincinnati
+SEARCH_RADIUS_METERS = 1000  # 1 km radius
+BUILDING_TAGS = {"building": True}
+OUTPUT_FILENAME = "cincinnati_test_buildings.geojson"
+COLUMNS_TO_KEEP = ["geometry", "building", "name"]
+
+
 def fetch_building_footprints():
+    """
+    Download building footprints from OpenStreetMap and export as GeoJSON.
+
+    Uses OSMnx to query the Overpass API for all features tagged as buildings
+    within a defined radius, filters for valid polygon geometries, and exports
+    the cleaned dataset to GeoJSON format.
+
+    Returns:
+        None. Writes GeoJSON file to the current directory.
+    """
     print("Initializing OSMnx pipeline...")
     
-    # Define a central point (Downtown Cincinnati) and a radius in meters
-    center_point = (39.1031, -84.5120) 
-    radius_meters = 1000  
-    
-    # We only want features tagged as buildings
-    tags = {"building": True}
-    
-    print(f"Fetching building data within {radius_meters}m of {center_point}...")
-    buildings_gdf = ox.features.features_from_point(center_point, tags=tags, dist=radius_meters)
+    print(f"Fetching building data within {SEARCH_RADIUS_METERS}m of {CENTER_POINT}...")
+    buildings_gdf = ox.features.features_from_point(CENTER_POINT, tags=BUILDING_TAGS, dist=SEARCH_RADIUS_METERS)
     
     print(f"Raw features retrieved: {len(buildings_gdf)}")
     
     # Filter for closed polygons (actual building footprints)
-    polygons_gdf = buildings_gdf[buildings_gdf.geom_type.isin(['Polygon', 'MultiPolygon'])]
+    polygons_gdf = buildings_gdf[buildings_gdf.geom_type.isin(["Polygon", "MultiPolygon"])]
     
     # Keep only the essential columns for the simulator
-    columns_to_keep = ['geometry', 'building', 'name']
-    existing_columns = [col for col in columns_to_keep if col in polygons_gdf.columns]
+    existing_columns = [col for col in COLUMNS_TO_KEEP if col in polygons_gdf.columns]
     clean_gdf = polygons_gdf[existing_columns]
     
     print(f"Cleaned building polygons: {len(clean_gdf)}")
     
     # Export to GeoJSON
-    output_filename = "cincinnati_test_buildings.geojson"
-    clean_gdf.to_file(output_filename, driver="GeoJSON")
-    print(f"Success! Saved to {output_filename}")
+    clean_gdf.to_file(OUTPUT_FILENAME, driver="GeoJSON")
+    print(f"Success! Saved to {OUTPUT_FILENAME}")
 
 if __name__ == "__main__":
     fetch_building_footprints()

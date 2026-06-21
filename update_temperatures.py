@@ -1,3 +1,11 @@
+"""
+Aggregate multi-day Landsat thermal data and update building temperature records.
+
+This module processes multiple thermal rasters, performs zonal statistics for each
+building, aggregates temperatures across days, and updates the database with averaged
+thermal data for robust urban heat analysis.
+"""
+
 import os
 from dotenv import load_dotenv
 import geopandas as gpd
@@ -9,7 +17,26 @@ from collections import defaultdict
 
 load_dotenv()
 
+# Thermal data processing parameters
+MAX_LANDSAT_RASTERS = 5  # Maximum expected satellite images
+THERMAL_CONVERSION_FACTOR = 0.00341802  # Scaling factor for raw DN to spectral radiance
+THERMAL_OFFSET = 149.0  # Offset for spectral radiance
+ABSOLUTE_ZERO_KELVIN = 273.15  # Kelvin to Celsius offset
+FAHRENHEIT_MULTIPLIER = 9 / 5  # Celsius to Fahrenheit conversion
+VALID_TEMP_RANGE = (50.0, 160.0)  # Valid temperature range in Fahrenheit for sanity check
+
+
 def update_database_with_averaged_thermal_data():
+    """
+    Aggregate multi-day thermal data and update building temperature records.
+
+    Processes all available Landsat thermal rasters, extracts per-building zonal
+    statistics, averages temperatures across days, and updates the PostGIS database
+    with robust multi-day average temperatures.
+
+    Returns:
+        None. Updates 'baseline_temp_f' column in the buildings database table.
+    """
     print("\n=======================================================")
     print("  STARTING MULTI-DAY SPATIAL PROCESSING PIPELINE")
     print("=======================================================")
@@ -31,7 +58,7 @@ def update_database_with_averaged_thermal_data():
     print(f"   -> Loaded {len(buildings_gdf)} building profiles.")
 
     # Find all downloaded landsat tiff files sequentially
-    raster_files = [f"landsat_thermal_{i}.tif" for i in range(1, 6) if os.path.exists(f"landsat_thermal_{i}.tif")]
+    raster_files = [f"landsat_thermal_{i}.tif" for i in range(1, MAX_LANDSAT_RASTERS + 1) if os.path.exists(f"landsat_thermal_{i}.tif")]
     
     if not raster_files:
         print("❌ Error: No calibrated satellite files found. Run harvest_landsat.py first.")
@@ -64,12 +91,16 @@ def update_database_with_averaged_thermal_data():
                         continue
                         
                     raw_mean = float(np.mean(valid_pixels))
-                    kelvin = (raw_mean * 0.00341802) + 149.0
-                    fahrenheit = (kelvin - 273.15) * (9/5) + 32
+                    # Convert Landsat Band 11 DN to brightness temperature (Kelvin)
+                    kelvin = (raw_mean * THERMAL_CONVERSION_FACTOR) + THERMAL_OFFSET
+                    # Convert Kelvin to Fahrenheit
+                    fahrenheit = (kelvin - ABSOLUTE_ZERO_KELVIN) * FAHRENHEIT_MULTIPLIER + 32
                     
-                    if 50 <= fahrenheit <= 160:
+                    # Sanity check: reject invalid outliers
+                    if VALID_TEMP_RANGE[0] <= fahrenheit <= VALID_TEMP_RANGE[1]:
                         building_thermal_history[b_id].append(fahrenheit)
-                except Exception:
+                except (OSError, ValueError):
+                    # Skip buildings that fail to process
                     continue
 
     print("\nComputing multi-day averages and pushing updates to Supabase...")
@@ -88,7 +119,7 @@ def update_database_with_averaged_thermal_data():
             updated_records += 1
 
     print(f"✅ Success! Calibrated and updated {updated_records} building footprints using a multi-day average.")
-    print("=======================================================\n")
+    print("=======================================================")
 
 if __name__ == "__main__":
     update_database_with_averaged_thermal_data()

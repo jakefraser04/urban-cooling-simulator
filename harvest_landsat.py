@@ -1,3 +1,11 @@
+"""
+Multi-scene Landsat thermal data harvester for urban cooling analysis.
+
+This module queries the Planetary Computer STAC API for Landsat Collection 2
+thermal imagery, filters scenes by cloud cover and peak temperature, and downloads
+the clearest scenes during the warmest periods to support urban heat analysis.
+"""
+
 import argparse
 from datetime import datetime, timedelta
 import pystac_client
@@ -5,7 +13,26 @@ import planetary_computer
 import rioxarray
 from shapely.geometry import box
 
+# Thermal conversion constants for Landsat Band 11 (TIRS)
+THERMAL_CONVERSION_FACTOR = 0.00341802  # Scaling factor for raw DN to spectral radiance
+THERMAL_OFFSET = 149.0  # Offset for spectral radiance calculation
+ABSOLUTE_ZERO_KELVIN = 273.15  # Kelvin to Celsius offset
+FAHRENHEIT_MULTIPLIER = 9 / 5  # Celsius to Fahrenheit conversion factor
+MAX_CLOUD_COVER = 35  # Acceptable cloud cover percentage for initial pool
+DEFAULT_TOP_SCENES = 5  # Number of clearest scenes to download
+
+
 def get_optimal_thermal_window():
+    """
+    Determine the optimal date range for thermal data queries.
+
+    Returns a date range string based on the current season:
+    - Summer/Fall (Jul-Oct): Past 60 days from today
+    - Other seasons: Previous year's summer (Jun-Aug)
+
+    Returns:
+        str: ISO date range in format "YYYY-MM-DD/YYYY-MM-DD"
+    """
     now = datetime.now()
     current_year = now.year
     
@@ -21,7 +48,24 @@ def get_optimal_thermal_window():
         
     return f"{start_date}/{end_date}"
 
-def harvest_real_thermal_data(lat, lon, buffer_size, temp_floor):
+def harvest_real_thermal_data(lat, lon, buffer_size, temp_floor, top_scenes=DEFAULT_TOP_SCENES):
+    """
+    Query and download Landsat thermal data for a specified region.
+
+    Searches the Planetary Computer STAC API for Landsat Collection 2 thermal
+    scenes, filters by cloud cover and peak temperature, and downloads the
+    clearest scenes that exceed the temperature threshold.
+
+    Args:
+        lat (float): Center latitude for search area
+        lon (float): Center longitude for search area
+        buffer_size (float): Degrees to extend from center point in all directions
+        temp_floor (float): Minimum peak temperature (°F) for scene acceptance
+        top_scenes (int): Number of clearest scenes to download (default: 5)
+
+    Returns:
+        None. Writes GeoTIFF files to the current directory.
+    """
     print("\n=======================================================")
     print("  INITIALIZING MULTI-SCENE SATELLITE HARVESTER")
     print("=======================================================")
@@ -44,7 +88,7 @@ def harvest_real_thermal_data(lat, lon, buffer_size, temp_floor):
         collections=["landsat-c2-l2"],
         intersects=search_area,
         datetime=dynamic_datetime,
-        query={"eo:cloud_cover": {"lt": 35}}, # Accept up to 35% clouds for a larger initial pool
+        query={"eo:cloud_cover": {"lt": MAX_CLOUD_COVER}},
     )
 
     items = list(search.item_collection())
@@ -65,8 +109,10 @@ def harvest_real_thermal_data(lat, lon, buffer_size, temp_floor):
                 local_slice = raster.rio.clip([search_area], crs="EPSG:4326")
                 max_raw_value = float(local_slice.max())
                 
-                max_kelvin = (max_raw_value * 0.00341802) + 149.0
-                max_fahrenheit = (max_kelvin - 273.15) * (9/5) + 32
+                # Convert Landsat Band 11 DN to brightness temperature (Kelvin)
+                max_kelvin = (max_raw_value * THERMAL_CONVERSION_FACTOR) + THERMAL_OFFSET
+                # Convert Kelvin to Fahrenheit
+                max_fahrenheit = (max_kelvin - ABSOLUTE_ZERO_KELVIN) * FAHRENHEIT_MULTIPLIER + 32
                 
                 if max_fahrenheit >= temp_floor:
                     warm_survivors.append({
@@ -75,15 +121,16 @@ def harvest_real_thermal_data(lat, lon, buffer_size, temp_floor):
                         "date": scene_date,
                         "temp": max_fahrenheit
                     })
-        except Exception:
+        except (OSError, ValueError) as e:
+            # Skip scenes that fail to download or parse
             continue
 
     if not warm_survivors:
         print(f"❌ Error: Zero scenes cleared the {temp_floor}°F threshold constraint.")
         return
 
-    # Sort survivors by cloud cover (clearest first) and grab the top 5
-    top_winners = sorted(warm_survivors, key=lambda x: x["cloud_cover"])[:5]
+    # Sort survivors by cloud cover (clearest first) and grab the top N
+    top_winners = sorted(warm_survivors, key=lambda x: x["cloud_cover"])[:top_scenes]
 
     print(f"\n🏆 Selected the Top {len(top_winners)} Clearest Heatwave Days for Averaging:")
     for i, winner in enumerate(top_winners):
@@ -104,10 +151,11 @@ def harvest_real_thermal_data(lat, lon, buffer_size, temp_floor):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Global Landsat Multi-Scene Harvester")
-    parser.add_argument("--lat", type=float, default=39.1031)
-    parser.add_argument("--lon", type=float, default=-84.5120)
-    parser.add_argument("--buffer", type=float, default=0.05)
-    parser.add_argument("--temp-floor", type=float, default=70.0)
+    parser.add_argument("--lat", type=float, default=39.1031, help="Center latitude for search area")
+    parser.add_argument("--lon", type=float, default=-84.5120, help="Center longitude for search area")
+    parser.add_argument("--buffer", type=float, default=0.05, help="Degrees to extend from center point")
+    parser.add_argument("--temp-floor", type=float, default=70.0, help="Minimum peak temperature (°F) for scene acceptance")
+    parser.add_argument("--top-scenes", type=int, default=DEFAULT_TOP_SCENES, help="Number of clearest scenes to download")
     
     args = parser.parse_args()
-    harvest_real_thermal_data(args.lat, args.lon, args.buffer, args.temp_floor)
+    harvest_real_thermal_data(args.lat, args.lon, args.buffer, args.temp_floor, args.top_scenes)

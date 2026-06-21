@@ -1,3 +1,11 @@
+"""
+Harvest real building heights from OpenStreetMap and update database records.
+
+This module queries the Overpass API to retrieve building height data from
+OpenStreetMap, performs spatial matching between OSM features and database records,
+and updates building height attributes with real-world data when available.
+"""
+
 import os
 import time
 from dotenv import load_dotenv
@@ -7,7 +15,38 @@ import requests
 
 load_dotenv()
 
+# Overpass API endpoints (with failover redundancy)
+OVERPASS_ENDPOINTS = [
+    "https://overpass.kumi.systems/api/interpreter",        # Mirror 1: Europe
+    "https://overpass-api.de/api/interpreter",              # Mirror 2: Germany
+    "https://overpass.openstreetmap.ru/api/interpreter",    # Mirror 3: Russia
+]
+
+# HTTP headers to mimic browser for bot-detection bypass
+HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
+    "Content-Type": "application/x-www-form-urlencoded",
+}
+
+# Height estimation parameters
+DEFAULT_HEIGHT_METERS = 12.0  # Default fallback (~3-4 residential floors)
+SPATIAL_DISTANCE_THRESHOLD = 0.0008  # ~80 meters in degrees
+METERS_PER_FLOOR = 3.5  # Assumed height per building level
+OVERPASS_TIMEOUT = 30  # Seconds
+
+
 def harvest_real_architectural_heights():
+    """
+    Query OpenStreetMap for building heights and update database records.
+
+    Connects to Supabase/PostGIS database, retrieves building geometries,
+    queries Overpass API for height data, performs spatial matching, and
+    updates records with real heights when available.
+
+    Returns:
+        None. Updates 'height_m' column in the buildings database table.
+    """
     print("\n=======================================================")
     print("  STARTING REAL ARCHITECTURAL HEIGHT HARVESTER (OSM)")
     print("=======================================================")
@@ -58,18 +97,18 @@ def harvest_real_architectural_heights():
     osm_data = None
     print(f"📡 Querying OpenStreetMap network matrix for architectural metadata...")
     
-    # Failover loop
-    for url in overpass_endpoints:
+    # Failover loop through multiple Overpass endpoints
+    for url in OVERPASS_ENDPOINTS:
         print(f"   -> Testing connection to: {url}")
         try:
-            response = requests.post(url, data={'data': overpass_query}, headers=headers, timeout=30)
+            response = requests.post(url, data={"data": overpass_query}, headers=HTTP_HEADERS, timeout=OVERPASS_TIMEOUT)
             if response.status_code == 200:
                 osm_data = response.json()
                 print(f"   ✅ Server accepted credentials! Connected successfully.")
                 break
             else:
                 print(f"      ⚠️ Server responded with code: {response.status_code}. Shifting to backup mirror...")
-        except Exception as e:
+        except (requests.exceptions.Timeout, requests.exceptions.RequestException):
             print(f"      ⚠️ Timeout or error connecting to this mirror. Shifting to backup...")
             continue
             
@@ -90,9 +129,9 @@ def harvest_real_architectural_heights():
             geom = row["geometry"]
             centroid = geom.centroid
             
-            best_height = 12.0 # Default fallback (~3-4 residential floors)
+            best_height = DEFAULT_HEIGHT_METERS
             
-            # Simple, hyper-fast nearest-neighbor lookup against OSM centroids
+            # Simple nearest-neighbor lookup against OSM centroids
             for element in elements:
                 if "center" not in element:
                     continue
@@ -103,8 +142,8 @@ def harvest_real_architectural_heights():
                 # Check spatial distance approximation
                 dist = ((centroid.y - osm_lat)**2 + (centroid.x - osm_lon)**2)**0.5
                 
-                # If this OSM element is the closest physical match to our database shape
-                if dist < 0.0008: # Tight proximity gate (~80 meters)
+                # If this OSM element is within proximity threshold
+                if dist < SPATIAL_DISTANCE_THRESHOLD:
                     tags = element.get("tags", {})
                     
                     # 1. Direct structural height attribute check
@@ -117,11 +156,11 @@ def harvest_real_architectural_heights():
                         except ValueError:
                             pass
                             
-                    # 2. Secondary fallback calculation: Estimate height based on building stories
+                    # 2. Fallback: Estimate height based on building stories
                     if "building:levels" in tags:
                         try:
                             levels = float(tags["building:levels"])
-                            best_height = max(levels * 3.5, 4.0) # Assume ~3.5 meters per structural floor
+                            best_height = max(levels * METERS_PER_FLOOR, 4.0)
                             break
                         except ValueError:
                             pass
